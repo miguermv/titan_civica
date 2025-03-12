@@ -2633,7 +2633,7 @@ def list_grants(session: SnowflakeConnection) -> list[FQN]:
             )
     return grants
 
-def list_grants_on_alls(session: SnowflakeConnection) -> list[FQN]:
+def list_grant_on_alls(session: SnowflakeConnection) -> list[FQN]:
     return []
 
 def list_iceberg_tables(session: SnowflakeConnection) -> list[FQN]:
