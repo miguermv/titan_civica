@@ -49,6 +49,9 @@ from .resources.role import Role
 from .resources.tag import Tag, TaggableResource
 from .scope import AccountScope, DatabaseScope, OrganizationScope, SchemaScope, TableScope
 
+from urllib.parse import urlparse, parse_qs
+from typing import Dict, Set, Union
+
 T = TypeVar("T")
 ResourceRef = Union[tuple[ResourceType, str], str]
 
@@ -1287,6 +1290,14 @@ def topological_sort(resource_set: set[T], references: set[tuple[T, T]]) -> dict
 
 
 def diff(remote_state: State, manifest: Manifest):
+    
+    # NEW
+    grant_cleaner = GrantCleaner()
+    grants_to_remove = grant_cleaner.find_grants_to_remove(manifest, remote_state)
+    # Remove the covered grants directly from remote_state
+    for urn in list(remote_state.keys()):  
+        if str(urn) in grants_to_remove:
+            del remote_state[urn]
 
     def _container_descriptor(resource_urn: URN) -> Optional[ContainerDescriptor]:
         """
@@ -1463,3 +1474,100 @@ def _container_urn(resource_urn: URN) -> URN:
     else:
         raise NotImplementedError(f"Unsupported resource scope: {scope}")
     return container_urn
+
+
+# NEW CLASS
+class GrantCleaner:
+    def __init__(self):
+        self.resource_hierarchy = {
+            'account': None,
+            'database': 'account',
+            'schema': 'database',
+            'view': 'schema',
+            'materialized view': 'schema',
+            'table': 'schema',
+            'column': 'table',
+            'file format': 'schema',
+            'masking policy': 'schema',
+            'pipe': 'schema',
+            'stage': 'schema',
+            'stream': 'schema',
+            'task': 'schema',
+        }
+    
+    def parse_urn(self, urn: Union[str, URN]) -> Dict:
+        urn_str = str(urn)
+        parsed = urlparse(urn_str)
+        query_params = parse_qs(parsed.query)
+        return {
+            'resource_type': parsed.path.split('/')[-1],
+            'params': {k: v[0] for k, v in query_params.items()},
+            'full_urn': urn_str
+        }
+    
+    def parse_on_param(self, on_param: str) -> tuple:
+        resource_type, path = on_param.split('/', 1)
+        return resource_type.lower(), path.split('.')
+    
+    def is_covered(self, grant: Dict, grant_on_all: Dict) -> bool:
+        if ('priv' not in grant['params'] or 'priv' not in grant_on_all['params'] or
+            'to' not in grant['params'] or 'to' not in grant_on_all['params'] or
+            'on' not in grant['params'] or 'on' not in grant_on_all['params']):
+            return False
+
+        if (grant['params']['priv'].lower() != grant_on_all['params']['priv'].lower() or
+            grant['params']['to'] != grant_on_all['params']['to']):
+            return False
+
+        g_resource, g_path = self.parse_on_param(grant['params']['on'])
+        goa_resource, goa_path = self.parse_on_param(grant_on_all['params']['on'])
+
+        wildcard = next((p for p in goa_path if p.startswith('<') and p.endswith('>')), None)
+        if not wildcard:
+            return False
+
+        wildcard_pos = goa_path.index(wildcard)
+        expected_type = wildcard[1:-1].lower()
+
+        return (
+            g_resource == expected_type and
+            self.validate_path(g_path, goa_path, wildcard_pos) and
+            self.validate_hierarchy(g_resource, goa_resource)
+        )
+    
+    def validate_path(self, grant_path: list, goa_path: list, wildcard_pos: int) -> bool:
+        return (
+            len(grant_path) == len(goa_path) and
+            all(g == goa for g, goa in zip(grant_path, goa_path) if goa != goa_path[wildcard_pos])
+        )
+    
+    def validate_hierarchy(self, grant_resource: str, goa_resource: str) -> bool:
+        current = grant_resource
+        while current:
+            if current == goa_resource:
+                return True
+            current = self.resource_hierarchy.get(current)
+        return False
+
+    def find_grants_to_remove(self, manifest: Manifest, remote_state: Dict) -> Set[str]:
+        grants = [
+            self.parse_urn(urn) 
+            for urn in remote_state.keys() 
+            if 'grant/' in str(urn)
+        ]
+        
+        grant_on_alls = [
+            self.parse_urn(urn) 
+            for urn in manifest._resources.keys() 
+            if 'grant_on_all/' in str(urn)
+        ]
+
+        to_remove = set()
+        for grant in grants:
+            for goa in grant_on_alls:
+                if self.is_covered(grant, goa):
+                    to_remove.add(grant['full_urn'])
+                    break
+
+        return to_remove
+
