@@ -2567,7 +2567,7 @@ def list_future_grants(session: SnowflakeConnection) -> list[FQN]:
             continue
         grant_data = _show_future_grants_to_role(session, role_name)
         for data in grant_data:
-            in_type = "database" if data["grant_on"] == "SCHEMA" else "schema"
+            in_type = "schema" if data["grant_on"] == "SCHEMA" else "database"
             collection = data["name"]
             to = f"role/{role_name}"
             grants.append(
